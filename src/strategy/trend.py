@@ -1,8 +1,9 @@
 from datetime import datetime
-from my_fin.data.market import get_daily_close_prices, get_current_price
-from my_fin.state.db import get_session
-from my_fin.state.models import Position
-from my_fin.notify.bark import send_notification
+from data.market import get_daily_close_prices, get_current_price
+from state.db import get_session
+from state.models import Position
+from notify.bark import send_notification
+from config import logger
 
 def run_strategy(symbol: str):
     """
@@ -22,7 +23,7 @@ def run_strategy(symbol: str):
             # 尚未持仓，判断是否满足买入条件
             # 获取最近2个交易日的收盘价 (T 和 T+1)
             closes = get_daily_close_prices(symbol, num_days=2)
-            if len(closes) >= 2:
+            if closes is not None and len(closes) >= 2:
                 day_t = closes[0]         # T 日收盘价
                 day_t_plus_1 = closes[1]  # T+1 日收盘价
 
@@ -64,6 +65,6 @@ def run_strategy(symbol: str):
                     session.commit()
                     
     except Exception as e:
-        print(f"策略执行异常 {symbol}: {e}")
+        logger.error(f"策略执行异常 {symbol}: {e}", exc_info=True)
     finally:
         session.close()
