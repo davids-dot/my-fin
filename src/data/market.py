@@ -2,10 +2,32 @@ import akshare as ak
 from config import logger
 import requests
 import urllib3
+import pandas as pd
+from datetime import datetime
 
 def _extract_code(symbol: str) -> str:
     """提取股票代码，去除市场前缀"""
     return symbol[2:] if symbol.startswith(('sh', 'sz')) else symbol
+
+def fetch_incremental_daily_raw() -> pd.DataFrame | None:
+    """
+    增量获取今日全市场的日线数据 (原始/不复权)
+    用于每天 15:30 盘后调度，更新 stock_daily 表
+    返回 DataFrame，包含字段：代码, 名称, 最新价, 开盘, 最高, 最低, 成交量, 成交额 等
+    """
+    try:
+        # 使用东财的全市场现价接口，在收盘后获取的就是当天的日线数据
+        logger.info("开始拉取今日全市场增量日线数据 (原始)...")
+        df = ak.stock_zh_a_spot_em()
+        if df.empty:
+            return None
+        return df
+    except (requests.exceptions.RequestException, urllib3.exceptions.HTTPError) as e:
+        logger.error(f"网络异常: 拉取今日全市场增量数据失败: {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"未知异常: 拉取今日全市场增量数据失败: {e}", exc_info=True)
+        return None
 
 def get_daily_close_prices(symbol: str, num_days: int = 2) -> list[float] | None:
     """
