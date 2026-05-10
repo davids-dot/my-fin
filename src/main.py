@@ -4,20 +4,15 @@ from strategy.trend import run_intraday_monitor
 from strategy.screener import run_daily_screener
 from config import logger
 
+## intrady, 日内的，盘中的
 def job_intraday():
     run_intraday_monitor()
 
+## screener, 选股器，筛选器
 def job_screener():
     run_daily_screener()
 
 def main():
-    # 1. 初始化数据库表结构 (基于 sql 文件)
-    init_db()
-    
-    logger.info("==================================")
-    logger.info("系统启动，初始化数据库完成...")
-    logger.info("==================================")
-    
     # 2. 启动定时任务
     scheduler = BlockingScheduler()
     

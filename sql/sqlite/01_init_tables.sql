@@ -3,7 +3,10 @@ CREATE TABLE IF NOT EXISTS stock_list (
     symbol VARCHAR(20) PRIMARY KEY,           -- 股票代码 (带前缀, 如 sh600519)
     name VARCHAR(50) NOT NULL,                -- 股票名称
     market VARCHAR(10),                       -- 所属市场 (sh/sz/bj)
-    status VARCHAR(10) DEFAULT 'ACTIVE'       -- 状态
+    status VARCHAR(10) DEFAULT 'ACTIVE',      -- 状态
+    pe FLOAT,                                 -- 市盈率 (动态)
+    market_cap FLOAT,                         -- 总市值 (亿元)
+    industry VARCHAR(50)                      -- 所属行业
 );
 
 -- 2. 股票日线历史表 (存储原始不复权数据)

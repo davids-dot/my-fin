@@ -14,6 +14,9 @@ class StockList(Base):
     name = Column(String(50), nullable=False)           # 股票名称
     market = Column(String(10))                         # 所属市场
     status = Column(String(10), default='ACTIVE')       # 状态
+    pe = Column(Float)                                  # 市盈率 (动态)
+    market_cap = Column(Float)                          # 总市值 (亿元)
+    industry = Column(String(50))                       # 所属行业
 
 class StockDaily(Base):
     """
