@@ -60,24 +60,17 @@ def run_daily_screener():
                     "amount": amt
                 })
 
-            # 1.2 更新 stock_list 中的基本面快照
-            pe = float(row['市盈率-动态']) if pd.notna(row['市盈率-动态']) else None
-            mcap = float(row['总市值']) / 1e8 if pd.notna(row['总市值']) else None
-            ind = str(row['板块']) if pd.notna(row['板块']) else None
+            # 1.2 更新 stock_list 中的基本面快照 (精简写法)
+            data = {
+                'symbol': symbol, 'name': str(row['名称']),
+                'pe': float(row['市盈率-动态']) if pd.notna(row['市盈率-动态']) else None,
+                'market_cap': float(row['总市值']) / 1e8 if pd.notna(row['总市值']) else None,
+                'industry': str(row['板块']) if pd.notna(row['板块']) else None
+            }
             
-            stmt_list = insert(StockList).values(
-                symbol=symbol,
-                name=str(row['名称']),
-                pe=pe,
-                market_cap=mcap,
-                industry=ind
-            ).on_conflict_do_update(
+            stmt_list = insert(StockList).values(data).on_conflict_do_update(
                 index_elements=['symbol'],
-                set_={
-                    'pe': pe,
-                    'market_cap': mcap,
-                    'industry': ind
-                }
+                set_={'pe': data['pe'], 'market_cap': data['market_cap'], 'industry': data['industry']}
             )
             session.execute(stmt_list)
 

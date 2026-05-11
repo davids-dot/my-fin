@@ -1,5 +1,6 @@
 import akshare as ak
 from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
 import pandas as pd
 from datetime import datetime
@@ -14,95 +15,119 @@ from state.db import init_db, get_session
 from state.models import StockList, StockDaily
 from data.market import _extract_code
 
-def init_stock_list():
-    """
-    获取全市场 A 股列表及基本面快照并存入 stock_list 表
-    """
-    logger.info(f"开始获取全市场 A 股列表及基本面数据... 当前配置的数据源: {DATA_PROVIDER}")
-    try:
-        if DATA_PROVIDER == 'em':
-            # 记录请求信息
-            logger.info("正在请求 东方财富 (East Money) 接口")
-            logger.info("目标函数: ak.stock_zh_a_spot_em()")
-            
-            # 使用东财接口获取全市场快照 (包含 PE, 市值, 行业)
-            df = ak.stock_zh_a_spot_em()
-            code_col, name_col = '代码', '名称'
-        else:
-            # 回退使用新浪接口 (只包含基础字段)
-            logger.info("正在请求 新浪财经 (Sina) 接口")
-            logger.info("目标函数: ak.stock_info_a_code_name()")
-            df = ak.stock_info_a_code_name()
-            code_col, name_col = 'code', 'name'
-            
-        session = get_session()
-        count = 0
-        for _, row in df.iterrows():
-            code = str(row[code_col])
-            name = str(row[name_col])
-            
-            # 简单判断市场
-            if code.startswith('6'):
-                market = 'sh'
-            elif code.startswith('0') or code.startswith('3'):
-                market = 'sz'
-            elif code.startswith('4') or code.startswith('8'):
-                market = 'bj'
-            else:
-                continue
-                
-            symbol = f"{market}{code}"
-            
-            # 提取基本面字段 (仅东财接口支持)
-            pe, market_cap, industry = None, None, None
-            if DATA_PROVIDER == 'em':
-                try:
-                    pe = float(row['市盈率-动态']) if pd.notna(row['市盈率-动态']) else None
-                    market_cap = float(row['总市值']) / 1e8 if pd.notna(row['总市值']) else None # 转换为亿元
-                    industry = str(row['板块']) if pd.notna(row['板块']) else None
-                except (ValueError, KeyError):
-                    pass
+def _fetch_stock_list_data():
+    """获取股票列表原始数据"""
+    if DATA_PROVIDER == 'em':
+        logger.info("请求 东方财富 接口: ak.stock_zh_a_spot_em()")
+        return ak.stock_zh_a_spot_em(), '代码', '名称'
+    
+    logger.info("请求 新浪财经 接口: ak.stock_info_a_code_name()")
+    return ak.stock_info_a_code_name(), 'code', 'name'
 
-            # 使用 SQLite 的 UPSERT 语法
-            stmt = insert(StockList).values(
-                symbol=symbol,
-                name=name,
-                market=market,
-                status='ACTIVE',
-                pe=pe,
-                market_cap=market_cap,
-                industry=industry
-            ).on_conflict_do_update(
-                index_elements=['symbol'],
-                set_={
-                    'name': name,
-                    'pe': pe,
-                    'market_cap': market_cap,
-                    'industry': industry,
-                    'status': 'ACTIVE'
-                }
-            )
+def _parse_fundamental(row) -> tuple:
+    """提取基本面字段 (仅东财支持)"""
+    if DATA_PROVIDER != 'em':
+        return None, None, None
+        
+    try:
+        pe = float(row['市盈率-动态']) if pd.notna(row['市盈率-动态']) else None
+        mcap = float(row['总市值']) / 1e8 if pd.notna(row['总市值']) else None
+        ind = str(row['板块']) if pd.notna(row['板块']) else None
+        return pe, mcap, ind
+    except (ValueError, KeyError):
+        return None, None, None
+
+def _upsert_stock_list(session, df, code_col, name_col) -> int:
+    """批量更新股票基础信息"""
+    count = 0
+    for _, row in df.iterrows():
+        code = str(row[code_col])
+        if code.startswith('6'): market = 'sh'
+        elif code.startswith(('0', '3')): market = 'sz'
+        elif code.startswith(('4', '8')): market = 'bj'
+        else: continue
             
-            session.execute(stmt)
-            count += 1
-            
+        pe, mcap, ind = _parse_fundamental(row)
+        data = {
+            'symbol': f"{market}{code}", 'name': str(row[name_col]),
+            'market': market, 'status': 'ACTIVE',
+            'pe': pe, 'market_cap': mcap, 'industry': ind
+        }
+        
+        stmt = insert(StockList).values(data).on_conflict_do_update(
+            index_elements=['symbol'], set_=data
+        )
+        session.execute(stmt)
+        count += 1
+    return count
+
+def init_stock_list():
+    """初始化股票列表及基本面"""
+    logger.info(f"开始获取 A 股列表... 数据源: {DATA_PROVIDER}")
+    try:
+        df, code_col, name_col = _fetch_stock_list_data()
+        session = get_session()
+        count = _upsert_stock_list(session, df, code_col, name_col)
+        
         session.commit()
         session.close()
-        logger.info(f"股票列表及基本面初始化完成，共处理 {count} 只股票。")
+        logger.info(f"股票列表初始化完成，共处理 {count} 只股票。")
         return True
     except Exception as e:
         logger.error(f"初始化股票列表失败: {e}", exc_info=True)
         return False
 
+def _parse_trade_date(date_str: str) -> datetime.date:
+    """解析日期字符串，兼容 'YYYY-MM-DD' 和 'YYYYMMDD' 格式"""
+    try:
+        return datetime.strptime(str(date_str), "%Y-%m-%d").date()
+    except ValueError:
+        return datetime.strptime(str(date_str), "%Y%m%d").date()
+
+def _fetch_and_save_daily(session, symbol, code, start_date, end_date) -> bool:
+    """拉取并保存单只股票的历史日线数据"""
+    if DATA_PROVIDER == 'em':
+        df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="")
+    else:
+        # 新浪日线接口参数不同，不支持 start_date，通常返回近期数据
+        df = ak.stock_zh_a_daily(symbol=symbol)
+        
+    if df is None or df.empty:
+        logger.warning(f"[{symbol}] 无历史数据，跳过。")
+        return True
+        
+    records = []
+    # 新浪接口列名为 'date', 东财为 '日期'
+    date_col = 'date' if DATA_PROVIDER != 'em' else '日期'
+    
+    for _, row in df.iterrows():
+        records.append({
+            "symbol": symbol,
+            "trade_date": _parse_trade_date(row[date_col]),
+            "open": float(row.get('开盘', row.get('open', 0))),
+            "close": float(row.get('收盘', row.get('close', 0))),
+            "high": float(row.get('最高', row.get('high', 0))),
+            "low": float(row.get('最低', row.get('low', 0))),
+            "volume": int(row.get('成交量', row.get('volume', 0))),
+            "amount": float(row.get('成交额', row.get('amount', 0)))
+        })
+        
+    if records:
+        for i in range(0, len(records), 100):
+            chunk = records[i:i+100]
+            stmt = insert(StockDaily).values(chunk).on_conflict_do_nothing(
+                index_elements=['symbol', 'trade_date']
+            )
+            session.execute(stmt)
+        session.commit()
+    return True
+
 def init_historical_daily(start_date="20200101"):
-    """
-    拉取全市场所有股票的历史日线数据 (原始/不复权)
-    """
+    """拉取全市场所有股票的历史日线数据"""
     session = get_session()
-    # 获取所有 ACTIVE 股票
     stocks = session.query(StockList).filter(StockList.status == 'ACTIVE').all()
     total = len(stocks)
-    logger.info(f"开始拉取历史日线数据，共计 {total} 只股票，起点日期: {start_date}")
+    logger.info(f"开始拉取历史日线数据，共计 {total} 只股票，数据源: {DATA_PROVIDER}")
     
     end_date = datetime.now().strftime("%Y%m%d")
     
@@ -117,56 +142,22 @@ def init_historical_daily(start_date="20200101"):
         
         while retry_count < max_retries and not success:
             try:
-                # 获取历史日线数据 (不复权)
-                df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="")
-                
-                if df.empty:
-                    logger.warning(f"[{symbol}] 无历史数据，跳过。")
-                    success = True
-                    break
-                
-                # 批量插入准备
-                records = []
-                for _, row in df.iterrows():
-                    # 转换日期格式: "2023-01-01" -> datetime.date
-                    try:
-                        trade_date = datetime.strptime(str(row['日期']), "%Y-%m-%d").date()
-                    except ValueError:
-                        # 有些接口可能返回 20230101
-                        trade_date = datetime.strptime(str(row['日期']), "%Y%m%d").date()
-                        
-                    records.append({
-                        "symbol": symbol,
-                        "trade_date": trade_date,
-                        "open": float(row['开盘']),
-                        "close": float(row['收盘']),
-                        "high": float(row['最高']),
-                        "low": float(row['最低']),
-                        "volume": int(row['成交量']),
-                        "amount": float(row['成交额'])
-                    })
-                
-                if records:
-                    # 批量 UPSERT
-                    stmt = insert(StockDaily).values(records)
-                    stmt = stmt.on_conflict_do_nothing(index_elements=['symbol', 'trade_date'])
-                    session.execute(stmt)
-                    session.commit()
-                    
-                success = True
-                
+                success = _fetch_and_save_daily(session, symbol, code, start_date, end_date)
+            except SQLAlchemyError as e:
+                session.rollback()
+                logger.error(f"[{symbol}] 数据库异常，停止重试: {e}")
+                retry_count = max_retries
             except Exception as e:
                 retry_count += 1
                 session.rollback()
-                wait_time = retry_count * 2  # 递增等待时间: 2s, 4s, 6s
-                logger.warning(f"[{symbol}] 拉取失败 (尝试 {retry_count}/{max_retries}): {e}. 等待 {wait_time}s 后重试...")
+                wait_time = retry_count * 2
+                logger.warning(f"[{symbol}] 拉取失败 ({retry_count}/{max_retries}): {e}. 等待 {wait_time}s...")
                 time.sleep(wait_time)
                 
         if not success:
-            logger.error(f"[{symbol}] 彻底拉取失败，跳过该股票。")
+            logger.error(f"[{symbol}] 彻底拉取失败，跳过。")
             
-        # 严格控制请求频率，防止被封 IP (东方财富对高频非常敏感)
-        time.sleep(0.5)  # 从 0.2s 增加到 0.5s
+        time.sleep(0.5)  # 频率控制
             
     session.close()
     logger.info("全市场历史数据初始化完成！")

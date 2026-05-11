@@ -1,0 +1,15 @@
+## ADDED Requirements
+
+### Requirement: Targeted exception handling in retry loop
+The system SHALL differentiate between transient errors (network, API timeouts) and deterministic database errors during the historical data fetch loop. Deterministic errors MUST NOT be retried.
+
+#### Scenario: Transient network error occurs
+- **WHEN** fetching historical data raises a generic `Exception` (e.g., `requests.exceptions.ReadTimeout` or `KeyError` from bad API response)
+- **THEN** the system catches the exception, logs it, and increments the retry counter
+- **THEN** the system sleeps with exponential backoff and retries the fetch
+
+#### Scenario: Deterministic database error occurs
+- **WHEN** the database insert operation raises a `sqlalchemy.exc.SQLAlchemyError` (e.g., `OperationalError`, `IntegrityError`)
+- **THEN** the system catches the exception and logs a critical error
+- **THEN** the system immediately sets the retry counter to its maximum to abort retries for that stock
+- **THEN** the system moves on to the next stock in the list
